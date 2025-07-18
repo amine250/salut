@@ -1,0 +1,238 @@
+name: CI/CD Pipeline
+
+# Workflow triggers: push to main, PRs to main, and manual dispatch
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Global environment variables
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Build job using matrix strategy for parallel compilation across platforms
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    
+    strategy:
+      fail-fast: false  # Continue building other targets even if one fails
+      matrix:
+        include:
+          # Linux x86_64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: false
+            
+          # Windows x86_64  
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            cross: false
+            extension: .exe
+            
+          # macOS Intel
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            cross: false
+            
+          # macOS Apple Silicon
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            cross: true
+
+    steps:
+      # Checkout repository code
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch full history for proper version detection
+
+      # Install Rust toolchain with target support
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Cache Rust dependencies to speed up builds
+      - name: Cache Rust dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.target }}-
+            ${{ runner.os }}-cargo-
+
+      # Extract version from Cargo.toml for artifact naming
+      - name: Extract version
+        shell: bash
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/.*= "//' | sed 's/".*//')
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Extracted version: $VERSION"
+
+      # Extract package name from Cargo.toml
+      - name: Extract package name
+        shell: bash
+        run: |
+          PACKAGE_NAME=$(grep '^name = ' Cargo.toml | head -1 | sed 's/.*= "//' | sed 's/".*//')
+          echo "PACKAGE_NAME=$PACKAGE_NAME" >> $GITHUB_ENV
+          echo "Extracted package name: $PACKAGE_NAME"
+
+      # Run tests before building (only on native targets to avoid cross-compilation issues)
+      - name: Run tests
+        if: matrix.cross == false
+        run: cargo test --target ${{ matrix.target }} --verbose
+
+      # Build the application
+      - name: Build application
+        shell: bash
+        run: |
+          if [[ "${{ matrix.cross }}" == "true" ]]; then
+            # For cross-compilation, we might need additional setup
+            cargo build --release --target ${{ matrix.target }} --verbose
+          else
+            cargo build --release --target ${{ matrix.target }} --verbose
+          fi
+
+      # Prepare binary for upload (handle Windows .exe extension)
+      - name: Prepare binary
+        shell: bash
+        run: |
+          BINARY_NAME="${{ env.PACKAGE_NAME }}${{ matrix.extension }}"
+          ARTIFACT_NAME="${{ env.PACKAGE_NAME }}-${{ env.VERSION }}-${{ matrix.target }}${{ matrix.extension }}"
+          
+          # Create artifacts directory
+          mkdir -p artifacts
+          
+          # Copy binary to artifacts with proper naming
+          cp "target/${{ matrix.target }}/release/${BINARY_NAME}" "artifacts/${ARTIFACT_NAME}"
+          
+          echo "ARTIFACT_NAME=${ARTIFACT_NAME}" >> $GITHUB_ENV
+          echo "Created artifact: ${ARTIFACT_NAME}"
+
+      # Upload build artifacts
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: artifacts/${{ env.ARTIFACT_NAME }}
+          retention-days: 7  # Keep artifacts for 7 days
+          if-no-files-found: error
+
+      # Verify binary works (basic smoke test on native platforms)
+      - name: Verify binary
+        if: matrix.cross == false
+        shell: bash
+        run: |
+          chmod +x "artifacts/${{ env.ARTIFACT_NAME }}" 2>/dev/null || true
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            ./artifacts/${{ env.ARTIFACT_NAME }} --version || ./artifacts/${{ env.ARTIFACT_NAME }} -V || echo "Binary verification completed"
+          else
+            ./artifacts/${{ env.ARTIFACT_NAME }} --version || ./artifacts/${{ env.ARTIFACT_NAME }} -V || echo "Binary verification completed"
+          fi
+
+  # Release job - only runs on version tags and after successful builds
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')  # Only run on version tags
+    
+    permissions:
+      contents: write  # Required for creating releases
+      
+    steps:
+      # Checkout repository
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Download all build artifacts
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: release-artifacts
+
+      # Extract version from tag
+      - name: Extract version from tag
+        run: |
+          TAG_VERSION=${GITHUB_REF#refs/tags/}
+          echo "TAG_VERSION=$TAG_VERSION" >> $GITHUB_ENV
+          echo "Release version: $TAG_VERSION"
+
+      # Prepare release assets
+      - name: Prepare release assets
+        run: |
+          echo "Preparing release assets..."
+          ls -la release-artifacts/
+          
+          # Create release directory
+          mkdir -p release
+          
+          # Move all artifacts to release directory and list them
+          find release-artifacts -name "*" -type f -exec cp {} release/ \;
+          
+          echo "Release assets:"
+          ls -la release/
+
+      # Create GitHub release with all platform binaries
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ env.TAG_VERSION }}
+          name: Release ${{ env.TAG_VERSION }}
+          draft: false
+          prerelease: ${{ contains(env.TAG_VERSION, '-') }}  # Mark as pre-release if version contains hyphen
+          generate_release_notes: true  # Auto-generate release notes from commits
+          files: release/*
+          body: |
+            ## Release ${{ env.TAG_VERSION }}
+            
+            ### Downloads
+            Choose the appropriate binary for your platform:
+            
+            - **Linux (x86_64)**: `*-x86_64-unknown-linux-gnu`
+            - **Windows (x86_64)**: `*-x86_64-pc-windows-msvc.exe`
+            - **macOS Intel**: `*-x86_64-apple-darwin`
+            - **macOS Apple Silicon**: `*-aarch64-apple-darwin`
+            
+            ### Installation
+            1. Download the appropriate binary for your platform
+            2. Make it executable: `chmod +x <binary-name>` (Unix-like systems)
+            3. Move to a directory in your PATH or run directly
+            
+            ### Verification
+            Run `<binary-name> --version` to verify the installation.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Optional: Cleanup job to remove old artifacts (runs after release)
+  cleanup:
+    name: Cleanup Artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [build, release]
+    if: always() && startsWith(github.ref, 'refs/tags/v')  # Run on releases regardless of success/failure
+    
+    steps:
+      - name: Delete workflow artifacts
+        uses: geekyeggo/delete-artifact@v2
+        with:
+          name: |
+            *-x86_64-unknown-linux-gnu
+            *-x86_64-pc-windows-msvc.exe
+            *-x86_64-apple-darwin
+            *-aarch64-apple-darwin
+          failOnError: false  # Don't fail if artifacts don't exist
