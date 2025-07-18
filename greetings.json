@@ -1,0 +1,24 @@
+{
+  "greetings": {
+    "en": {
+      "0": "Hello {name}!",
+      "1": "Hello {name}! Now get to fucking work!",
+      "2": "Hello {name}! Time to kick ass and get shit done!"
+    },
+    "fr": {
+      "0": "Salut {name}!",
+      "1": "Salut {name}! Allez, au boulot putain!",
+      "2": "Salut {name}! Bouge-toi le cul et fais péter le travail!"
+    },
+    "es": {
+      "0": "Hola {name}!",
+      "1": "Hola {name}! A trabajar joder!",
+      "2": "Hola {name}! Mueve el culo y machaca ese trabajo!"
+    },
+    "de": {
+      "0": "Hallo {name}!",
+      "1": "Hallo {name}! Ran an die verdammte Arbeit!",
+      "2": "Hallo {name}! Beweg deinen Arsch und rock die Arbeit!"
+    }
+  }
+}
