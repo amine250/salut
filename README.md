@@ -1,6 +1,6 @@
 # Salut
 
-A multilingual greeting CLI tool with profanity levels written in Rust. 
+Salut, *hello in French*, A multilingual greeting CLI tool with profanity levels written in Rust. 
 
 This tool is designed to greet you with motivational messages when you open your terminal.
 
@@ -10,6 +10,10 @@ This tool is designed to greet you with motivational messages when you open your
 - Configurable profanity levels (0-2)
 - Clean command-line interface with helpful error messages
 - Extensible greeting system via JSON configuration
+
+## Download 
+
+See [Releases](https://github.com/amine250/salut/releases).
 
 ## Usage
 
