@@ -93,10 +93,10 @@ mod tests {
         assert_eq!(greeting, "Hello Alice!");
 
         let greeting = data.get_greeting("fr", 1, "Bob").unwrap();
-        assert_eq!(greeting, "Salut Bob! Putain!");
+        assert_eq!(greeting, "Salut Bob! Allez, au boulot putain!");
 
         let greeting = data.get_greeting("es", 2, "Carol").unwrap();
-        assert_eq!(greeting, "Hola Carol y que te jodan!");
+        assert_eq!(greeting, "Hola Carol! Mueve el culo y machaca ese trabajo!");
     }
 
     #[test]
