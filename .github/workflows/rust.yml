@@ -233,7 +233,7 @@ jobs:
         with:
           path: artifacts
 
-      - name: Non-Release Build Summary
+      - name: Build Summary
         run: |
           echo "## ✅ Build Verification Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -247,14 +247,27 @@ jobs:
           echo "The following binaries were successfully built and verified:" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          find artifacts -name "binary-*" -type d | while read dir; do
-            platform=$(basename "$dir" | sed 's/binary-//')
-            find "$dir" -type f | while read file; do
-              filename=$(basename "$file")
-              size=$(ls -lh "$file" | awk '{print $5}' 2>/dev/null || echo "Unknown")
-              echo "- **$platform**: \`$filename\` ($size)" >> $GITHUB_STEP_SUMMARY
+          # Check if artifacts directory exists
+          if [ -d "artifacts" ]; then
+            # Process each platform's artifacts
+            find artifacts -name "binary-*" -type d | sort | while read dir; do
+              if [ -d "$dir" ]; then
+                platform=$(basename "$dir" | sed 's/binary-//')
+                echo "Processing $platform artifacts..." >&2
+                
+                # Find files in this platform directory
+                find "$dir" -type f | while read file; do
+                  if [ -f "$file" ]; then
+                    filename=$(basename "$file")
+                    size=$(ls -lh "$file" 2>/dev/null | awk '{print $5}' || echo "Unknown")
+                    echo "- **$platform**: \`$filename\` ($size)" >> $GITHUB_STEP_SUMMARY
+                  fi
+                done
+              fi
             done
-          done
+          else
+            echo "⚠️ No artifacts found - this may indicate a build failure." >> $GITHUB_STEP_SUMMARY
+          fi
           
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "💡 **Note:** To create a release, push a tag starting with 'v' (e.g., \`git tag v1.0.0 && git push origin v1.0.0\`)" >> $GITHUB_STEP_SUMMARY
@@ -335,10 +348,15 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### 📦 Released Artifacts:" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          for file in release-assets/*; do
-            if [ -f "$file" ]; then
-              filename=$(basename "$file")
-              size=$(ls -lh "$file" | awk '{print $5}')
-              echo "- \`$filename\` ($size)" >> $GITHUB_STEP_SUMMARY
-            fi
-          done
+          
+          if [ -d "release-assets" ] && [ "$(ls -A release-assets/)" ]; then
+            for file in release-assets/*; do
+              if [ -f "$file" ]; then
+                filename=$(basename "$file")
+                size=$(ls -lh "$file" | awk '{print $5}')
+                echo "- \`$filename\` ($size)" >> $GITHUB_STEP_SUMMARY
+              fi
+            done
+          else
+            echo "⚠️ No release assets found" >> $GITHUB_STEP_SUMMARY
+          fi
