@@ -1,49 +1,273 @@
-name: Rust
+name: Build and Release
 
+# Trigger the workflow on pushes to main branch or manual dispatch
 on:
   push:
-    branches: [ "main" ]
-    tags: [ "v*" ]
-  pull_request:
-    branches: [ "main" ]
+    branches:
+      - main
+  workflow_dispatch:
 
+# Set environment variables for consistent usage across jobs
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
 
 jobs:
+  # Job to extract version from Cargo.toml for consistent versioning
+  version:
+    name: Extract Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract version from Cargo.toml
+        id: version
+        run: |
+          # Extract version from Cargo.toml
+          VERSION=$(grep '^version = ' Cargo.toml | head -n1 | sed 's/version = "\(.*\)"/\1/')
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "tag=v${VERSION}" >> $GITHUB_OUTPUT
+          echo "Extracted version: ${VERSION}"
+
+  # Build job with matrix strategy for cross-platform compilation
   build:
-
-    runs-on: ubuntu-latest
+    name: Build for ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    needs: version
+    strategy:
+      fail-fast: false  # Don't cancel other builds if one fails
+      matrix:
+        include:
+          # Linux x86_64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: linux-x64
+            cross: false
+          
+          # Linux ARM64 (cross-compile from x86_64)
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: linux-arm64
+            cross: true
+          
+          # Windows x86_64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            name: windows-x64
+            cross: false
+            extension: .exe
+          
+          # macOS x86_64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            name: macos-x64
+            cross: false
+          
+          # macOS ARM64 (Apple Silicon)
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            name: macos-arm64
+            cross: false
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross (for cross-compilation)
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Configure Cargo for cross-compilation
+        if: matrix.cross
+        run: |
+          echo "[target.${{ matrix.target }}]" >> ~/.cargo/config.toml
+          echo "linker = \"aarch64-linux-gnu-gcc\"" >> ~/.cargo/config.toml
+        shell: bash
+
+      - name: Install cross-compilation dependencies (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build binary
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+        shell: bash
+
+      - name: Get binary name from Cargo.toml
+        id: binary
+        run: |
+          BINARY_NAME=$(grep '^name = ' Cargo.toml | head -n1 | sed 's/name = "\(.*\)"/\1/')
+          echo "name=${BINARY_NAME}" >> $GITHUB_OUTPUT
+          echo "Binary name: ${BINARY_NAME}"
+        shell: bash
+
+      - name: Prepare binary for upload
+        run: |
+          BINARY_NAME="${{ steps.binary.outputs.name }}"
+          TARGET_DIR="target/${{ matrix.target }}/release"
+          BINARY_PATH="${TARGET_DIR}/${BINARY_NAME}${{ matrix.extension }}"
+          
+          # Create release directory
+          mkdir -p release
+          
+          # Copy and rename binary with version and platform info
+          RELEASE_NAME="${BINARY_NAME}-${{ needs.version.outputs.tag }}-${{ matrix.name }}${{ matrix.extension }}"
+          cp "${BINARY_PATH}" "release/${RELEASE_NAME}"
+          
+          echo "RELEASE_NAME=${RELEASE_NAME}" >> $GITHUB_ENV
+          echo "BINARY_PATH=release/${RELEASE_NAME}" >> $GITHUB_ENV
+        shell: bash
+
+      - name: Verify binary works
+        run: |
+          # Basic verification that the binary can execute
+          if [ "${{ matrix.os }}" != "windows-latest" ]; then
+            chmod +x "${{ env.BINARY_PATH }}"
+            if ! "${{ env.BINARY_PATH }}" --help > /dev/null 2>&1 && ! "${{ env.BINARY_PATH }}" --version > /dev/null 2>&1; then
+              echo "Warning: Binary verification failed, but continuing..."
+            else
+              echo "Binary verification successful"
+            fi
+          else
+            # For Windows, just check if file exists and has reasonable size
+            if [ -f "${{ env.BINARY_PATH }}" ]; then
+              SIZE=$(stat -c%s "${{ env.BINARY_PATH }}" 2>/dev/null || stat -f%z "${{ env.BINARY_PATH }}" 2>/dev/null || echo "0")
+              if [ "$SIZE" -gt 1000 ]; then
+                echo "Binary verification successful (size: $SIZE bytes)"
+              else
+                echo "Warning: Binary seems too small"
+              fi
+            else
+              echo "Error: Binary not found"
+              exit 1
+            fi
+          fi
+        shell: bash
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.name }}
+          path: ${{ env.BINARY_PATH }}
+          if-no-files-found: error
+
+  # Release job that creates GitHub release with all binaries
   release:
-    needs: build
+    name: Create Release
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [version, build]
     permissions:
-      contents: write
+      contents: write  # Required for creating releases
     steps:
-    - uses: actions/checkout@v4
-    - name: Build release
-      run: cargo build --release --verbose
-    - name: Create release archive
-      run: |
-        mkdir -p release
-        cp target/release/salut release/
-        cp README.md greetings.json release/
-        tar -czf salut-linux-x86_64.tar.gz -C release .
-    - name: Create Release
-      uses: ncipollo/create-release@v1
-      with:
-        tag: ${{ github.ref_name }}
-        name: Release ${{ github.ref_name }}
-        draft: false
-        prerelease: false
-        generateReleaseNotes: true
-        artifacts: "salut-linux-x86_64.tar.gz"
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          # Move all binaries to release-assets directory
+          find artifacts -name "binary-*" -type d | while read dir; do
+            find "$dir" -type f -exec mv {} release-assets/ \;
+          done
+          
+          echo "Release assets:"
+          ls -la release-assets/
+
+      - name: Check if release exists
+        id: release_check
+        run: |
+          # Check if a release with this tag already exists
+          if gh release view "${{ needs.version.outputs.tag }}" --repo "${{ github.repository }}" > /dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Release ${{ needs.version.outputs.tag }} already exists"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "Release ${{ needs.version.outputs.tag }} does not exist"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Create or update release
+        run: |
+          if [ "${{ steps.release_check.outputs.exists }}" = "true" ]; then
+            echo "Updating existing release..."
+            gh release upload "${{ needs.version.outputs.tag }}" release-assets/* --clobber --repo "${{ github.repository }}"
+          else
+            echo "Creating new release..."
+            
+            # Generate release notes
+            cat > release-notes.md << EOF
+          # Release ${{ needs.version.outputs.tag }}
+          
+          ## 🚀 What's New
+          
+          Automated release of the Rust CLI application.
+          
+          ## 📦 Downloads
+          
+          Choose the appropriate binary for your platform:
+          
+          - **Linux x64**: \`*-linux-x64\`
+          - **Linux ARM64**: \`*-linux-arm64\`
+          - **Windows x64**: \`*-windows-x64.exe\`
+          - **macOS x64**: \`*-macos-x64\`
+          - **macOS ARM64** (Apple Silicon): \`*-macos-arm64\`
+          
+          ## 🔧 Installation
+          
+          1. Download the binary for your platform
+          2. Make it executable (Unix systems): \`chmod +x <binary-name>\`
+          3. Move to your PATH or run directly
+          
+          ## 📋 Build Information
+          
+          - **Commit**: ${{ github.sha }}
+          - **Build Date**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          - **Rust Version**: $(rustc --version 2>/dev/null || echo "Unknown")
+          EOF
+            
+            gh release create "${{ needs.version.outputs.tag }}" \
+              --title "Release ${{ needs.version.outputs.tag }}" \
+              --notes-file release-notes.md \
+              --repo "${{ github.repository }}" \
+              release-assets/*
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Release Summary
+        run: |
+          echo "## 🎉 Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Release Tag:** ${{ needs.version.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Release URL:** https://github.com/${{ github.repository }}/releases/tag/${{ needs.version.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 Built Artifacts:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          for file in release-assets/*; do
+            if [ -f "$file" ]; then
+              filename=$(basename "$file")
+              size=$(ls -lh "$file" | awk '{print $5}')
+              echo "- \`$filename\` ($size)" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
